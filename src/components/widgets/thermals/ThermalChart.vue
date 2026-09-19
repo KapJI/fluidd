@@ -53,6 +53,35 @@ import type { ThermalSubKey } from '@/store/charts/thermal-columns'
 import BrowserMixin from '@/mixins/browser'
 import type { ChartSelectedLegends } from '@/store/charts/types'
 
+// How close the pointer must be to a line, in pixels, and how much wider the
+// line it picks becomes.
+const HOVER_TOLERANCE = 16
+const HOVER_WIDTH_INCREASE = 1.5
+
+// zrender derives dash spacing from the line width, so a widened line needs the
+// pattern its original width produced.
+const dashPattern = (type: string | number | number[], width: number) => (
+  type === 'dashed'
+    ? [4 * width, 2 * width]
+    : type === 'dotted'
+      ? [width]
+      : type
+)
+
+const nearestIndex = (values: ArrayLike<number>, value: number) => {
+  let low = 0
+  let high = values.length - 1
+
+  while (low < high) {
+    const middle = (low + high) >> 1
+
+    if (values[middle] < value) low = middle + 1
+    else high = middle
+  }
+
+  return low
+}
+
 @Component({})
 export default class ThermalChart extends Mixins(BrowserMixin) {
   @Prop({ type: Boolean })
@@ -66,6 +95,7 @@ export default class ThermalChart extends Mixins(BrowserMixin) {
 
   paused = false
   pointer: number[] | null = null
+  hoveredSeriesName: string | null = null
   series: LineSeriesOption[] = []
   initialSelected: Record<string, boolean> = {}
 
@@ -274,12 +304,96 @@ export default class ThermalChart extends Mixins(BrowserMixin) {
     }, { notMerge: true })
   }
 
+  // The series take no pointer events, so the line under the pointer is found
+  // by comparing pixel distance to the value each series draws there.
   onPointerMove (event: { offsetX: number, offsetY: number }) {
-    this.pointer = [event.offsetX, event.offsetY]
+    const chart = this.chart
+
+    if (!chart || this.paused) return
+
+    const point = [event.offsetX, event.offsetY]
+
+    // Conversion extrapolates beyond the grid, so a pointer over the axis
+    // labels would otherwise still pick a line.
+    if (!chart.containPixel({ gridIndex: 0 }, point)) {
+      this.pointer = null
+      this.hoverSeries(null)
+
+      return
+    }
+
+    this.pointer = point
+
+    const source = this.smoothedChartData
+    const dates = source.date
+
+    if (!dates?.length) return
+
+    const [date] = chart.convertFromPixel({ gridIndex: 0 }, point)
+
+    if (!Number.isFinite(date)) return
+
+    // The pointer usually sits between two samples; interpolate so the test
+    // follows the drawn segment, which matters once the chart is zoomed in.
+    const next = nearestIndex(dates, date)
+    const previous = Math.max(next - 1, 0)
+    const span = dates[next] - dates[previous]
+    const ratio = span > 0 ? (date - dates[previous]) / span : 0
+
+    let nearest: string | null = null
+    let nearestDistance = HOVER_TOLERANCE
+
+    for (const series of this.series) {
+      const name = series.name as string
+
+      // Deselected series are still in the options; an invisible line must not
+      // take the highlight from a visible one.
+      if (this.initialSelected[name] === false) continue
+
+      const column = source[name]
+      const from = column?.[previous]
+      const to = column?.[next]
+
+      if (!Number.isFinite(from) || !Number.isFinite(to)) continue
+
+      const value = from + (to - from) * ratio
+      const y = chart.convertToPixel({ yAxisIndex: series.yAxisIndex ?? 0 }, value)
+      const distance = Math.abs(y - event.offsetY)
+
+      if (distance < nearestDistance) {
+        nearestDistance = distance
+        nearest = name
+      }
+    }
+
+    this.hoverSeries(nearest)
   }
 
   onPointerOut () {
     this.pointer = null
+    this.hoverSeries(null)
+  }
+
+  // Emphasis is what row hover dispatches, and it restyles the area fill too;
+  // the pointer only widens the line it picks.
+  hoverSeries (seriesName: string | null) {
+    if (!this.chart || seriesName === this.hoveredSeriesName) return
+
+    this.hoveredSeriesName = seriesName
+
+    this.chart.setOption({
+      series: this.series
+        .map(series => {
+          const width = series.lineStyle?.width ?? 1
+          const type = series.lineStyle?.type ?? 'solid'
+
+          return series.name === seriesName
+            ? { lineStyle: { width: width + HOVER_WIDTH_INCREASE, type: dashPattern(type, width) } }
+            : { lineStyle: { width, type } }
+        })
+    })
+
+    this.syncAxisPointer()
   }
 
   // setOption drops the axis pointer's symbols without it noticing and leaves
@@ -538,6 +652,13 @@ export default class ThermalChart extends Mixins(BrowserMixin) {
       showSymbol: false,
       animation: false,
       color,
+      // echarts' own hover emphasis is unusable here: every series has an area
+      // beneath its line (invisible on targets and duty cycles, still
+      // hit-tested), so a hover lands on whichever area is on top rather than
+      // the line being pointed at, and emphasis.focus blurs everything else --
+      // the chart flashes as the pointer moves and most lines are unreachable.
+      // The pointer handler above picks the nearest line instead.
+      silent: true,
       emphasis: {
         focus: 'series'
       },
