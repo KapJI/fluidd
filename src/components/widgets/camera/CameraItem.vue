@@ -16,7 +16,7 @@
         @update:camera-name-menu-items="cameraNameMenuItems = $event"
         @update:raw-camera-url="rawCameraUrl = $event"
         @update:frames-per-second="handleFramesPerSecond"
-        @frame="$emit('frame', $event)"
+        v-on="frameListeners"
       />
     </template>
     <div v-else>
@@ -176,6 +176,14 @@ export default class CameraItem extends Vue {
     }
 
     return cameraName
+  }
+
+  // The per-frame loop in CameraMixin exists only to raise this event, so
+  // don't ask for it unless something upstream is listening.
+  get frameListeners () {
+    return this.$listeners.frame
+      ? { frame: (element: HTMLImageElement | HTMLIFrameElement | HTMLVideoElement) => this.$emit('frame', element) }
+      : {}
   }
 
   handleFramesPerSecond (framesPerSecond : number) {

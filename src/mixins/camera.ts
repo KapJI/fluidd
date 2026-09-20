@@ -104,7 +104,7 @@ export default class CameraMixin extends Vue {
   }
 
   created () {
-    if (this.autoRaiseFrameEvent) {
+    if (this.autoRaiseFrameEvent && this.$listeners.frame) {
       this.animating = true
       this.raiseFrameEvents()
     }
