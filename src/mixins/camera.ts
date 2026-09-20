@@ -1,4 +1,4 @@
-import Vue from 'vue'
+import Vue, { markRaw } from 'vue'
 import { Component, Emit, Prop, Ref, Watch } from 'vue-property-decorator'
 import { consola } from 'consola'
 import type { CameraConnectionStatus, CameraNameMenuItem } from '@/types'
@@ -16,6 +16,7 @@ export default class CameraMixin extends Vue {
 
   cameraTransformStyle = ''
   animating = false
+  resizeObserver: ResizeObserver | null = null
   status: CameraConnectionStatus = 'disconnected'
   cameraName = ''
   cameraNameMenuItems: CameraNameMenuItem[] = []
@@ -26,6 +27,12 @@ export default class CameraMixin extends Vue {
   onCamera () {
     this.stopPlayback()
     this.checkPlayback()
+  }
+
+  // Rotation and flip only change when the user changes a setting.
+  @Watch('camera', { deep: true })
+  onCameraTransform () {
+    this.updateCameraTransformStyle()
   }
 
   get apiUrl (): string {
@@ -76,35 +83,51 @@ export default class CameraMixin extends Vue {
   }
 
   updateCameraTransformStyle () {
+    if (this.streamingElement) {
+      this.cameraTransformStyle = this.createTransform()
+    }
+  }
+
+  // Only the frame event needs a per-frame loop; the transform is watched.
+  raiseFrameEvents () {
     requestAnimationFrame(() => {
       if (!this.animating) {
         return
       }
 
       if (this.streamingElement) {
-        this.cameraTransformStyle = this.createTransform()
-
-        if (this.autoRaiseFrameEvent) {
-          this.$emit('frame', this.streamingElement)
-        }
+        this.$emit('frame', this.streamingElement)
       }
 
-      this.updateCameraTransformStyle()
+      this.raiseFrameEvents()
     })
   }
 
   created () {
-    this.animating = true
-    this.updateCameraTransformStyle()
+    if (this.autoRaiseFrameEvent) {
+      this.animating = true
+      this.raiseFrameEvents()
+    }
   }
 
   mounted () {
     document.addEventListener('visibilitychange', this.checkPlayback, false)
     this.checkPlayback()
+
+    // The scale depends on the element's own size, which the stream decides.
+    if (typeof ResizeObserver !== 'undefined' && this.streamingElement) {
+      this.resizeObserver = markRaw(new ResizeObserver(this.updateCameraTransformStyle))
+
+      this.resizeObserver.observe(this.streamingElement)
+    } else {
+      this.updateCameraTransformStyle()
+    }
   }
 
   beforeDestroy () {
     this.animating = false
+    this.resizeObserver?.disconnect()
+    this.resizeObserver = null
     document.removeEventListener('visibilitychange', this.checkPlayback)
     this.stopPlayback()
   }
